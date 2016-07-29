@@ -1,44 +1,39 @@
 import scrapy
+from go_scraper.items import GoRecordItem
+
 
 class SinaGoSpider(scrapy.Spider):
     """
     SinaScraper
     """
     name = 'sina_go'
-    encoding = 'gb2312'
-    sinago_base_url = 'http://duiyi.sina.com.cn/gibo/new_gibo.asp?cur_page=%d'
-    #start_urls = [ sinago_base_url%i for i in range(0,666)]
-    start_urls = [ sinago_base_url%i for i in range(1)]
-    info_dict_transform = {'TE': 'GameInfo',
-                           'RD': 'Date',
-                           'PW':'WhitePlayer',
-                           'PB':'BlackPlayer',
-                           'PC':'Location',
-                           'KO': 'Komi',
-                           'RE': 'GameResult',
-                           'BR': 'BlackRank',
+    encoding = 'gbk'
+    file_name = 'sina_go.json'
+    start_urls = ['http://duiyi.sina.com.cn/gibo/new_gibo.asp?cur_page=%d' % i for i in range(0, 666)]
+    cached_qipu_url = {}
+    info_dict_transform = {'PW': 'WhitePlayer',
                            'WR': 'WhiteRank',
-                           }
+                           'PB': 'BlackPlayer',
+                           'BR': 'BlackRank',
+                           'RE': 'GameResult',
+                           'TE': 'GameInfo',
+                           'RD': 'Date',
+                           'PC': 'Location',
+                           'KO': 'Komi'}
 
-    def parse(self,response):
-        """
-        Add qipu_list page first, add them to the not_crawled_set
-        Parse individual qipu
-        """
-        for href in response.css('.body_text1[bgcolor="#FFFFFF"]:nth-child(2) a::attr(href)'):
-            url =  href.extract().split("'")[1]
-            yield scrapy.Request(url, callback=self.parse_qipu_text)
+    def parse(self, response):
+        for href in response.css('.body_text1[bgcolor="#FFFFFF"] a::attr(href)'):
+            qipu_url = href.extract().split("'")[1]
+            if qipu_url not in self.cached_qipu_url:
+                self.cached_qipu_url[qipu_url] = 1
+                yield scrapy.Request(qipu_url, callback=self.parse_qipu_text)
+            else:
+                continue
 
-    def parse_qipu_text(self,response):
-        """
-        1. remove unecessary
-        2. parse info
-        3. parse game
-        """
+    def parse_qipu_text(self, response):
         text = response.body.decode(self.encoding)
         info_blocks = text.split('\n')
-        print text
-        qipu_dict = {}
+        go_record_item = GoRecordItem()
         qipu_list = []
         for b in info_blocks:
             info_type = b[:2]
@@ -46,11 +41,12 @@ class SinaGoSpider(scrapy.Spider):
                 if info_type in self.info_dict_transform:
                     key = self.info_dict_transform[info_type]
                     value = b[b.find('[') + 1 : b.find(']')]
-                    qipu_dict[key] = value
+                    go_record_item[key] = value
             else:
                 qipu_list.append(b.strip())
         game_record = ''.join(qipu_list)
         game_record = game_record[1:] if game_record.startswith(')') else game_record
         game_record = game_record[:-1] if game_record.endswith(')') else game_record
-        qipu_dict['GameRecord'] = game_record
-        yield qipu_dict
+        go_record_item['GameRecord'] = game_record
+        with open(self.file_name, 'a') as f:
+            f.write(str(go_record_item).decode('unicode-escape').encode('utf-8')+'\n')
