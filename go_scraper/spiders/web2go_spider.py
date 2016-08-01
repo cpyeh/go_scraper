@@ -1,4 +1,9 @@
 import scrapy
+import pandas as pd
+from functools import partial
+import requests
+from go_scraper.items import GoRecordItem
+
 
 class Web2GoSpider(scrapy.Spider):
     """
@@ -7,58 +12,79 @@ class Web2GoSpider(scrapy.Spider):
     """
     name = 'web2go'
     encoding = 'big5'
-    web2go_base_url = 'http://web2go.board19.com/gopro/yymm_list.php' +\
-        '?id=%d-%02d'
-    start_urls = [ web2go_base_url%(i,j)
-        for i in range(1991,2001)
-        for j in range(1,13)]
+    start_urls = ['http://web2go.board19.com/gopro/pro_list.php?ar=%s' % c for c in ['CN', 'JP', 'KR', 'TW']]
 
-    def start_requests(self):
-        yield self.make_requests_from_url(url)
+    player_base_url = "http://web2go.board19.com/gopro/psnx_list.php?id=%s"
+    qipu_info_dict = {}
 
-    def parse(self,response):
-        """
-        Add qipu_list page first, add them to the not_crawled_set
-        Parse individual qipu
-        """
-        self.add_qipu_list(response)
-        #for href in response.css('.courselist ul li.c a::attr(href)'):
-        #    url =  response.urljoin(href.extract()).replace('/..','')
-        #    yield scrapy.Request(url, callback=self.parse_qipu_text)
+    qipu_crawled = set()
+    qipu_not_crawled = set()
+    qipu_base_url = "http://web2go.board19.com/test/getsgf.php?fn=%s"
 
-    def add_qipu_list(self,response):
-        for href in response.css('.pagenum a::attr(href)'):
-            url = response.urljoin(href.extract())
-            if url not in self.start_urls['crawled']:
-                self.start_urls['not_crawled'].add(url)
-                print url
+    info_field = ['WhitePlayer', 'BlackPlayer', 'GameResult', 'GameInfo', 'Date']
 
-    def parse_qipu_text(self,response):
-        """
-        1. remove unecessary
-        2. parse info
-        3. parse game
-        """
-        text = response.body.decode(self.encoding)#.decode("utf-8")
-        if text.startswith("(;"):
-            text = text[2:]
-        print text
-        qipu_dict = self.parse_info(text)
-        qipu_dict["GameRecord"] = self.parse_qipu(text)
-        yield qipu_dict
+    def parse(self, response):
+        player_ids = self.get_player_id(response)
+        print player_ids
 
-    def parse_info(self, text):
-        qipu_info_dict = {}
-        qipu_info_str = text[:text.find(";")] +\
-            text[text.rfind(";")+6:] # trailing info
-        for i in qipu_info_str.split("]")[:-1]:
-            k,v = i.split("[")
-            if k in ignore_info_set:
+        for player_id in player_ids:
+            player_url = self.player_base_url % player_id
+            self.add_qipu(player_url)
+        print self.qipu_not_crawled
+
+        while self.qipu_not_crawled:
+            qipu_id = self.qipu_not_crawled.pop()
+            if qipu_id not in self.qipu_crawled:
+                self.qipu_crawled.add(qipu_id)
+                qipu_url = self.qipu_base_url % qipu_id
+                parse_qipu_by_id = partial(self.parse_qipu, id=qipu_id)
+                yield scrapy.Request(qipu_url, callback=parse_qipu_by_id)
+            else:
                 continue
-            qipu_info_dict[info_dict_transform[k]] = v
-        return qipu_info_dict
 
-    def parse_qipu(self, text):
-        trailing_info_pos = text.rfind(";")+6
-        qipu_str = text[text.find(";")+1:trailing_info_pos]
-        return qipu_str
+    @staticmethod
+    def get_player_id(response):
+        player_ids = []
+        #id_base_url = 'http://web2go.board19.com/gopro/psn_list.php?id='
+        id_base_url = 'psn_list.php?id='
+        for href in response.css('tbody td a::attr(href)'):
+            url = href.extract()
+            if url.startswith(id_base_url):
+                player_ids.append(url.replace(id_base_url, ''))
+        return player_ids
+
+    def add_qipu(self, player_url):
+        """
+        :param response:
+        :return:
+        Get gipu id add to qipu_not_crawled and get info and add to qipu_info
+        """
+
+        response = requests.get(player_url)
+        response_body = response.text
+        start = response_body.find('<table')
+        end = response_body.find('/table>')
+        table_html = response_body[start:end+7]
+
+        qipu_df = pd.read_html(table_html, encoding=self.encoding, header=0)[0]
+        qipu_df.columns = ['No', 'qipu_id', 'BlackPlayer', 'WhitePlayer', 'Date',
+                           'Age', 'GameResult', 'NumberOfMoves', 'GameInfo']
+        for _,qipu_row_dict in qipu_df.iterrows():
+            qipu_id = qipu_row_dict['qipu_id']
+            self.qipu_not_crawled.add(qipu_id)
+            self.qipu_info_dict[qipu_id] = qipu_row_dict
+
+    def parse_qipu(self, response, id):
+        text = response.body.decode(self.encoding)
+        go_record_item = GoRecordItem()
+        go_record_item['GameRecord'] = self.parse_qipu_text(text)
+        for key in self.info_field:
+            go_record_item[key] = self.qipu_info_dict[id][key]
+        print go_record_item
+        yield go_record_item
+
+    @staticmethod
+    def parse_qipu_text(text):
+        start = text.find(';') + 1
+        end = text.find(';', start)
+        return text[start: end]
